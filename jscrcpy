@@ -1,0 +1,13 @@
+#!/bin/bash
+
+args=()
+for arg in "$@"; do
+    if [[ "$prev" == "-s" || "$prev" == "--serial" ]]; then
+        ip=$(mdns-resolve "$arg")
+        arg="${ip}:4242"
+    fi
+    prev="$arg"
+    args+=("$arg")
+done
+
+exec scrcpy "${args[@]}"
