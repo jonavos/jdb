@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# Handle "jdb devices" — annotate with mDNS reverse mapping
+if [[ "$1" == "devices" ]]; then
+    declare -A ip_to_name
+    while IFS=$'\t' read -r ip label; do
+        [[ -n "$ip" ]] && ip_to_name["$ip"]="$label"
+    done < <(mdns-resolve reverse-map)
+
+    adb devices "${@:2}" | while IFS= read -r line; do
+        if [[ "$line" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):[0-9]+[[:space:]] ]]; then
+            ip="${BASH_REMATCH[1]}"
+            if [[ -n "${ip_to_name[$ip]}" ]]; then
+                # label is "name (mdnshost)" — split into name and mdns part
+                name="${ip_to_name[$ip]%% (*}"
+                mdns="${ip_to_name[$ip]#* }"
+                printf '%s\t%s\t%s\n' "$name" "$line" "$mdns"
+                continue
+            fi
+        fi
+        echo "$line"
+    done
+    exit
+fi
+
+args=()
+for arg in "$@"; do
+    if [[ "$prev" == "-s" ]]; then
+        ip=$(mdns-resolve "$arg")
+        arg="${ip}:4242"
+    fi
+    prev="$arg"
+    args+=("$arg")
+done
+
+# Handle "jdb connect <name>"
+if [[ "${args[0]}" == "connect" ]]; then
+    ip=$(mdns-resolve "${args[1]}")
+    exec adb connect "${ip}:4242"
+fi
+
+exec adb "${args[@]}"

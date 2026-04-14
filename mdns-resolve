@@ -1,0 +1,51 @@
+#!/bin/bash
+
+CONFIG="${HOME}/.config/mdns-resolve/hosts"
+
+cmd_resolve() {
+    local name="$1"
+    if [[ -f "$CONFIG" ]]; then
+        source "$CONFIG"
+    fi
+    local mdnshost="${!name:-$name}"
+    avahi-resolve -n "$mdnshost" | cut -f 2
+}
+
+cmd_reverse_map() {
+    [[ -f "$CONFIG" ]] || exit 0
+    while IFS='=' read -r name mdnshost; do
+        [[ -z "$name" || "$name" == \#* ]] && continue
+        ip=$(avahi-resolve -n "$mdnshost" 2>/dev/null | cut -f 2)
+        if [[ -n "$ip" ]]; then
+            printf '%s\t%s (%s)\n' "$ip" "$name" "$mdnshost"
+        fi
+    done < "$CONFIG"
+}
+
+cmd_help() {
+    echo "Usage: mdns-resolve [command] [args]"
+    echo
+    echo "Commands:"
+    echo "  resolve <name|mdns-hostname>   Resolve a name to an IP (default)"
+    echo "  reverse-map                    Resolve all hosts and print IP/name map"
+    echo "  help                           Show this help"
+    echo
+    echo "Friendly names are mapped in ~/.config/mdns-resolve/hosts"
+}
+
+case "${1:-}" in
+    reverse-map)    cmd_reverse_map ;;
+    help|--help|-h) cmd_help ;;
+    resolve)
+        [[ -z "${2:-}" ]] && { cmd_help; exit 1; }
+        cmd_resolve "$2"
+        ;;
+    "")
+        cmd_help
+        exit 1
+        ;;
+    *)
+        # Default: treat argument as a name to resolve
+        cmd_resolve "$1"
+        ;;
+esac
