@@ -4,11 +4,23 @@ CONFIG="${HOME}/.config/mdns-resolve/hosts"
 
 cmd_resolve() {
     local name="$1"
-    if [[ -f "$CONFIG" ]]; then
+    local mdnshost=""
+    if [[ -f "$CONFIG" && "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
         source "$CONFIG"
+        mdnshost="${!name:-}"
     fi
-    local mdnshost="${!name:-$name}"
-    avahi-resolve -n "$mdnshost" | cut -f 2
+    if [[ -z "$mdnshost" ]]; then
+        # No mapping — treat input as an mDNS name, appending .local if bare
+        if [[ "$name" == *.* ]]; then
+            mdnshost="$name"
+        else
+            mdnshost="$name.local"
+        fi
+    fi
+    local ip
+    ip=$(avahi-resolve -n "$mdnshost" | cut -f 2)
+    [[ -n "$ip" ]] || exit 1
+    printf '%s\n' "$ip"
 }
 
 cmd_reverse_map() {

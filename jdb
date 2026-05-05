@@ -26,7 +26,7 @@ fi
 args=()
 for arg in "$@"; do
     if [[ "$prev" == "-s" ]]; then
-        ip=$(mdns-resolve "$arg")
+        ip=$(mdns-resolve "$arg") || { echo "jdb: could not resolve '$arg'" >&2; exit 1; }
         arg="${ip}:4242"
     fi
     prev="$arg"
@@ -35,7 +35,7 @@ done
 
 # Handle "jdb connect <name>"
 if [[ "${args[0]}" == "connect" ]]; then
-    ip=$(mdns-resolve "${args[1]}")
+    ip=$(mdns-resolve "${args[1]}") || { echo "jdb: could not resolve '${args[1]}'" >&2; exit 1; }
     exec adb connect "${ip}:4242"
 fi
 
