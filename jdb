@@ -23,11 +23,21 @@ if [[ "$1" == "devices" ]]; then
     exit
 fi
 
+# Resolve "name[:port]" → "ip:port" (defaults to 4242)
+resolve_with_port() {
+    local input="$1" name="$1" port=4242 ip
+    if [[ "$input" == *:* ]]; then
+        name="${input%%:*}"
+        port="${input##*:}"
+    fi
+    ip=$(mdns-resolve "$name") || { echo "jdb: could not resolve '$name'" >&2; return 1; }
+    printf '%s:%s\n' "$ip" "$port"
+}
+
 args=()
 for arg in "$@"; do
     if [[ "$prev" == "-s" ]]; then
-        ip=$(mdns-resolve "$arg") || { echo "jdb: could not resolve '$arg'" >&2; exit 1; }
-        arg="${ip}:4242"
+        arg=$(resolve_with_port "$arg") || exit 1
     fi
     prev="$arg"
     args+=("$arg")
@@ -35,8 +45,8 @@ done
 
 # Handle "jdb connect <name>"
 if [[ "${args[0]}" == "connect" ]]; then
-    ip=$(mdns-resolve "${args[1]}") || { echo "jdb: could not resolve '${args[1]}'" >&2; exit 1; }
-    exec adb connect "${ip}:4242"
+    target=$(resolve_with_port "${args[1]}") || exit 1
+    exec adb connect "$target"
 fi
 
 exec adb "${args[@]}"
