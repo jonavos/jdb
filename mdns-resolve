@@ -17,10 +17,11 @@ cmd_resolve() {
             mdnshost="$name.local"
         fi
     fi
+    # Try avahi; on failure (IP literal, unknown name, …) fall through to the
+    # input so callers (adb, etc.) can attempt their own resolution.
     local ip
-    ip=$(avahi-resolve -n "$mdnshost" | cut -f 2)
-    [[ -n "$ip" ]] || exit 1
-    printf '%s\n' "$ip"
+    ip=$(avahi-resolve -n "$mdnshost" 2>/dev/null | cut -f 2)
+    printf '%s\n' "${ip:-$name}"
 }
 
 cmd_reverse_map() {
