@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# Print the serial of the adb device to act on.
+# - 1 device: print its serial.
+# - >1 devices: prompt the user via /dev/tty and print the chosen serial.
+# - 0 devices: error and exit non-zero.
+
+declare -A ip_to_name
+while IFS=$'\t' read -r ip label; do
+    [[ -n "$ip" ]] && ip_to_name["$ip"]="$label"
+done < <(mdns-resolve reverse-map)
+
+serials=()
+labels=()
+while IFS=$'\t' read -r serial state _; do
+    [[ -z "$serial" || "$serial" == "List of devices attached" ]] && continue
+    [[ "$state" == "device" ]] || continue
+    serials+=("$serial")
+    label=""
+    if [[ "$serial" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):[0-9]+ ]]; then
+        ip="${BASH_REMATCH[1]}"
+        label="${ip_to_name[$ip]%% (*}"
+    fi
+    labels+=("$label")
+done < <(adb devices)
+
+n=${#serials[@]}
+if (( n == 0 )); then
+    echo "adb-pick-device: no devices connected" >&2
+    exit 1
+fi
+if (( n == 1 )); then
+    printf '%s\n' "${serials[0]}"
+    exit 0
+fi
+
+if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
+    echo "adb-pick-device: multiple devices connected and no tty for prompting" >&2
+    exit 1
+fi
+
+{
+    echo "Multiple devices connected:"
+    for i in "${!serials[@]}"; do
+        if [[ -n "${labels[i]}" ]]; then
+            printf '  %d) %-20s  %s\n' $((i+1)) "${labels[i]}" "${serials[i]}"
+        else
+            printf '  %d) %s\n' $((i+1)) "${serials[i]}"
+        fi
+    done
+} > /dev/tty
+
+while :; do
+    printf 'Select device [1-%d]: ' "$n" > /dev/tty
+    if ! read -r choice < /dev/tty; then
+        echo >&2
+        exit 1
+    fi
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
+        printf '%s\n' "${serials[$((choice-1))]}"
+        exit 0
+    fi
+    echo "Invalid choice." > /dev/tty
+done

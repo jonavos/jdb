@@ -1,13 +1,27 @@
 #!/bin/bash
 
 args=()
+has_s=0
+needs_device=1
 for arg in "$@"; do
     if [[ "$prev" == "-s" || "$prev" == "--serial" ]]; then
         ip=$(mdns-resolve "$arg")
         arg="${ip}:4242"
+        has_s=1
     fi
+    case "$arg" in
+        --version|--help) needs_device=0 ;;
+    esac
     prev="$arg"
     args+=("$arg")
 done
+
+if (( needs_device && !has_s )); then
+    count=$(adb devices 2>/dev/null | awk -F'\t' 'NR>1 && $2=="device"' | wc -l)
+    if (( count > 1 )); then
+        serial=$(adb-pick-device) || exit
+        args=(--serial "$serial" "${args[@]}")
+    fi
+fi
 
 exec scrcpy "${args[@]}"

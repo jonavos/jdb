@@ -34,9 +34,11 @@ resolve_with_port() {
 }
 
 args=()
+has_s=0
 for arg in "$@"; do
     if [[ "$prev" == "-s" ]]; then
         arg=$(resolve_with_port "$arg")
+        has_s=1
     fi
     prev="$arg"
     args+=("$arg")
@@ -45,6 +47,35 @@ done
 # Handle "jdb connect <name>"
 if [[ "${args[0]}" == "connect" ]]; then
     exec adb connect "$(resolve_with_port "${args[1]}")"
+fi
+
+# First positional arg (the adb subcommand), skipping flags and their values.
+subcmd=""
+skip_next=0
+for a in "${args[@]}"; do
+    if (( skip_next )); then skip_next=0; continue; fi
+    case "$a" in
+        -s|-H|-P|-L|-t) skip_next=1; continue ;;
+        -*) continue ;;
+    esac
+    subcmd="$a"
+    break
+done
+
+# Subcommands that don't operate on a single device — pass through unchanged.
+case "$subcmd" in
+    ""|start-server|kill-server|version|--version|help|--help|pair|disconnect|reconnect|mdns)
+        exec adb "${args[@]}"
+        ;;
+esac
+
+# Inject -s when multiple devices are connected and the user didn't pick one.
+if (( !has_s )); then
+    count=$(adb devices 2>/dev/null | awk -F'\t' 'NR>1 && $2=="device"' | wc -l)
+    if (( count > 1 )); then
+        serial=$(adb-pick-device) || exit
+        args=(-s "$serial" "${args[@]}")
+    fi
 fi
 
 exec adb "${args[@]}"
