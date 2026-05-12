@@ -49,6 +49,11 @@ if [[ "${args[0]}" == "connect" ]]; then
     exec adb connect "$(resolve_with_port "${args[1]}")"
 fi
 
+# Handle "jdb disconnect <name>" — bare "jdb disconnect" still disconnects all.
+if [[ "${args[0]}" == "disconnect" && -n "${args[1]:-}" ]]; then
+    exec adb disconnect "$(resolve_with_port "${args[1]}")"
+fi
+
 # First positional arg (the adb subcommand), skipping flags and their values.
 subcmd=""
 skip_next=0
