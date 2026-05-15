@@ -24,4 +24,4 @@ if (( needs_device && !has_s )); then
     fi
 fi
 
-exec scrcpy "${args[@]}"
+nohup scrcpy "${args[@]}" >/dev/null 2>&1 &
