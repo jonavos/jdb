@@ -33,6 +33,7 @@ Then:
 
 ```sh
 jdb connect pixel              # resolves "pixel" → mDNS → IP, adb connect <ip>:4242
+jdb connect pixel tablet kiosk # connect to several devices in one go
 jdb -s tablet shell             # -s gets resolved too
 jdb -s kiosk:5555 logcat        # explicit port honored; otherwise defaults to 4242
 jdb devices                     # rows get prefixed with friendly names

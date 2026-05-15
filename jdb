@@ -1,5 +1,28 @@
 #!/bin/bash
 
+# Handle "jdb", "jdb help", "jdb --help" — print jdb-specific blurb then adb help.
+if [[ $# -eq 0 || "$1" == "help" || "$1" == "--help" ]]; then
+    cat <<'EOF'
+jdb — adb wrapper that resolves mDNS friendly names and picks a device when
+more than one is attached.
+
+jdb-specific behavior:
+  jdb devices                 adb devices, annotated with friendly names
+  jdb connect NAME[:PORT]...  connect to one or more devices by friendly name
+                              (port defaults to 4242)
+  jdb disconnect [NAME]       resolve NAME via mDNS; bare form disconnects all
+  jdb -s NAME[:PORT] ...      -s argument is resolved via mDNS
+
+When multiple devices are attached and -s is not given, jdb prompts to pick
+one via adb-pick-device. Names without an alias are tried as <name>.local;
+IP literals and unresolvable inputs pass through unchanged.
+
+All other arguments are forwarded to adb. adb usage follows.
+----
+EOF
+    exec adb help
+fi
+
 # Handle "jdb devices" — annotate with mDNS reverse mapping
 if [[ "$1" == "devices" ]]; then
     declare -A ip_to_name
@@ -44,9 +67,13 @@ for arg in "$@"; do
     args+=("$arg")
 done
 
-# Handle "jdb connect <name>"
+# Handle "jdb connect <name> [<name> ...]"
 if [[ "${args[0]}" == "connect" ]]; then
-    exec adb connect "$(resolve_with_port "${args[1]}")"
+    status=0
+    for name in "${args[@]:1}"; do
+        adb connect "$(resolve_with_port "$name")" || status=$?
+    done
+    exit "$status"
 fi
 
 # Handle "jdb disconnect <name>" — bare "jdb disconnect" still disconnects all.
@@ -69,7 +96,7 @@ done
 
 # Subcommands that don't operate on a single device — pass through unchanged.
 case "$subcmd" in
-    ""|start-server|kill-server|version|--version|help|--help|pair|disconnect|reconnect|mdns)
+    start-server|kill-server|version|--version|pair|disconnect|reconnect|mdns)
         exec adb "${args[@]}"
         ;;
 esac
