@@ -39,26 +39,72 @@ if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
     exit 1
 fi
 
+draw_line() {
+    local i=$1 marker='  ' on='' off=''
+    if (( i == cursor )); then
+        marker='> '
+        on=$'\e[7m'
+        off=$'\e[0m'
+    fi
+    if [[ -n "${labels[i]}" ]]; then
+        printf '%s%s%d) %-20s  %s%s\n' "$marker" "$on" $((i+1)) "${labels[i]}" "${serials[i]}" "$off"
+    else
+        printf '%s%s%d) %s%s\n' "$marker" "$on" $((i+1)) "${serials[i]}" "$off"
+    fi
+}
+
+print_menu() {
+    local i
+    for ((i=0; i<n; i++)); do
+        draw_line "$i"
+    done
+    printf '[Up/Down to move, Enter to select, 1-%d to jump, q to cancel]\n' "$n"
+}
+
+cursor=0
+
 {
     echo "Multiple devices connected:"
-    for i in "${!serials[@]}"; do
-        if [[ -n "${labels[i]}" ]]; then
-            printf '  %d) %-20s  %s\n' $((i+1)) "${labels[i]}" "${serials[i]}"
-        else
-            printf '  %d) %s\n' $((i+1)) "${serials[i]}"
-        fi
-    done
+    print_menu
 } > /dev/tty
 
+old_stty=$(stty -g < /dev/tty)
+trap 'stty "$old_stty" < /dev/tty' EXIT
+stty -echo -icanon < /dev/tty
+
+redraw() {
+    printf '\e[%dA\e[J' $((n+1)) > /dev/tty
+    print_menu > /dev/tty
+}
+
 while :; do
-    printf 'Select device [1-%d]: ' "$n" > /dev/tty
-    if ! read -r choice < /dev/tty; then
-        echo >&2
-        exit 1
-    fi
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
-        printf '%s\n' "${serials[$((choice-1))]}"
-        exit 0
-    fi
-    echo "Invalid choice." > /dev/tty
+    IFS= read -rsn1 c < /dev/tty
+    case "$c" in
+        $'\x1b')
+            IFS= read -rsn2 -t 0.1 rest < /dev/tty
+            case "$rest" in
+                '[A'|'OA') (( cursor > 0 )) && cursor=$((cursor-1)) ;;
+                '[B'|'OB') (( cursor < n-1 )) && cursor=$((cursor+1)) ;;
+                '[H'|'OH') cursor=0 ;;
+                '[F'|'OF') cursor=$((n-1)) ;;
+                '') exit 1 ;;
+            esac
+            redraw
+            ;;
+        '')
+            printf '%s\n' "${serials[$cursor]}"
+            exit 0
+            ;;
+        [1-9])
+            if (( c <= n )); then
+                cursor=$((c-1))
+                redraw
+                printf '%s\n' "${serials[$cursor]}"
+                exit 0
+            fi
+            ;;
+        q)
+            exit 1
+            ;;
+    esac
 done
