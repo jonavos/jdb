@@ -56,6 +56,46 @@ resolve_with_port() {
     printf '%s:%s\n' "$(mdns-resolve "$name")" "$port"
 }
 
+# A Neat serial looks like two letters + digits, e.g. NB12249000245.
+SERIAL_RE='^[A-Za-z]{2}[0-9]{8,}$'
+
+# verify_serial <name> <ip:port> — after connecting, confirm the device really
+# is the one we asked for; a stale/wrong mDNS or Pulse IP could point elsewhere.
+# `getprop` prints lines like "[ro.serialno]: [NB12249000245]", so we look for
+# the expected serial bracketed in any property (works whatever ro.* holds it).
+# On mismatch (or an unreadable/unauthorized device) we disconnect and fail.
+# Returns 0 — connection kept — when there's no serial to check against
+# (IP literals, plain mDNS hostnames that aren't serials).
+verify_serial() {
+    local name="${1%%:*}" target="$2" expected props got i
+    expected="$(mdns-resolve host "$name" 2>/dev/null)"; expected="${expected%.local}"
+    [[ -z "$expected" && "$name" =~ $SERIAL_RE ]] && expected="$name"
+    [[ -n "$expected" ]] || return 0
+
+    # Give the freshly-connected device a moment to come online.
+    for i in 1 2 3 4 5 6; do
+        [[ "$(adb -s "$target" get-state 2>/dev/null)" == "device" ]] && break
+        sleep 0.5
+    done
+
+    props="$(adb -s "$target" shell getprop 2>/dev/null | tr -d '\r')"
+
+    # Right device: the expected serial appears bracketed in some property. Neat
+    # devices expose it several ways (ro.serialno, ro.boot.serialno, …), so a
+    # legitimate device always matches. Case-insensitive so an alias table whose
+    # serial casing differs from ro.serialno doesn't wrongly drop a valid device.
+    if printf '%s' "$props" | grep -iqF "[$expected]"; then
+        return 0
+    fi
+
+    # Anything else — a different device, or one we can't read (offline /
+    # unauthorized) — is unverified, so disconnect.
+    got="$(printf '%s\n' "$props" | sed -nE 's/^\[ro\.(boot\.)?serialno\]: \[(.*)\]$/\2/p' | head -1)"
+    echo "jdb: serial check failed for '$name' ($target): expected $expected, got ${got:-<unreadable>} — disconnecting" >&2
+    adb disconnect "$target" >/dev/null 2>&1
+    return 1
+}
+
 args=()
 has_s=0
 for arg in "$@"; do
@@ -71,7 +111,9 @@ done
 if [[ "${args[0]}" == "connect" ]]; then
     status=0
     for name in "${args[@]:1}"; do
-        adb connect "$(resolve_with_port "$name")" || status=$?
+        target="$(resolve_with_port "$name")"
+        if ! adb connect "$target"; then status=$?; continue; fi
+        verify_serial "$name" "$target" || status=1
     done
     exit "$status"
 fi
