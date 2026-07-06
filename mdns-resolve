@@ -1,53 +1,175 @@
 #!/bin/bash
 
 CONFIG="${HOME}/.config/mdns-resolve/hosts"
+PULSE_CONF="${HOME}/.config/mdns-resolve/pulse.conf"
+CACHE_DIR="${HOME}/.cache/mdns-resolve"
 
-cmd_resolve() {
-    local name="$1"
-    local mdnshost=""
+# Seconds since a file's mtime (a large number if it doesn't exist).
+_age() {
+    local m
+    m=$(stat -c %Y "$1" 2>/dev/null) || { echo 999999999; return; }
+    echo $(( $(date +%s) - m ))
+}
+
+# pulse_ip <serial> — print a device's current IP from Neat Pulse, or nothing.
+# Used only as a fallback when mDNS fails. Results are cached per serial for
+# PULSE_TTL seconds (default 1h); the endpoint list is cached for the same.
+pulse_ip() {
+    local serial="$1" base ttl ipf listf id ip
+    [[ -n "$serial" && -f "$PULSE_CONF" ]] || return 1
+    # shellcheck disable=SC1090
+    source "$PULSE_CONF"
+    [[ -n "${PULSE_API_KEY:-}" && -n "${PULSE_ORG:-}" ]] || return 1
+    base="${PULSE_API_BASE:-https://api.pulse.neat.no}"
+    ttl="${PULSE_TTL:-3600}"
+    mkdir -p "$CACHE_DIR" 2>/dev/null && chmod 700 "$CACHE_DIR" 2>/dev/null
+
+    # Fresh cached IP for this serial?
+    ipf="$CACHE_DIR/${serial}.ip"
+    if [[ -f "$ipf" ]] && (( $(_age "$ipf") < ttl )); then
+        cat "$ipf"; return 0
+    fi
+
+    # (Re)fetch the org endpoint list (serial -> id) if stale.
+    listf="$CACHE_DIR/endpoints.json"
+    if [[ ! -f "$listf" ]] || (( $(_age "$listf") >= ttl )); then
+        curl -fsS --max-time 15 -H "Authorization: Bearer $PULSE_API_KEY" \
+            "$base/v1/orgs/$PULSE_ORG/endpoints" -o "$listf.tmp" 2>/dev/null \
+            && mv -f "$listf.tmp" "$listf" || { rm -f "$listf.tmp"; return 1; }
+    fi
+
+    id=$(jq -r --arg s "$serial" \
+        'first(.endpoints[] | select(.serial==$s) | .id) // empty' \
+        "$listf" 2>/dev/null)
+    [[ -n "$id" ]] || return 1
+
+    # The localIpAddress lives on the per-endpoint detail.
+    ip=$(curl -fsS --max-time 15 -H "Authorization: Bearer $PULSE_API_KEY" \
+        "$base/v1/orgs/$PULSE_ORG/endpoints/$id" 2>/dev/null \
+        | jq -r '.localIpAddress // empty' 2>/dev/null)
+    [[ -n "$ip" ]] || return 1
+
+    printf '%s\n' "$ip" > "$ipf"
+    printf '%s\n' "$ip"
+}
+
+# resolve_to_ip <name|serial|mdns-host> — print an IP, or nothing on failure.
+# mDNS (avahi) is tried first; Neat Pulse is the fallback when it fails.
+resolve_to_ip() {
+    local name="$1" mdnshost="" ip
     if [[ -f "$CONFIG" && "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        # shellcheck disable=SC1090
         source "$CONFIG"
         mdnshost="${!name:-}"
     fi
     if [[ -z "$mdnshost" ]]; then
-        # No mapping — treat input as an mDNS name, appending .local if bare
-        if [[ "$name" == *.* ]]; then
-            mdnshost="$name"
-        else
-            mdnshost="$name.local"
-        fi
+        # No friendly-name mapping — treat input as an mDNS name / serial,
+        # appending .local if it's bare.
+        [[ "$name" == *.* ]] && mdnshost="$name" || mdnshost="$name.local"
     fi
-    # Try avahi; on failure (IP literal, unknown name, …) fall through to the
-    # input so callers (adb, etc.) can attempt their own resolution.
+    # 1) mDNS — authoritative on the local link. Capped with `timeout` so that
+    # off-LAN (where multicast goes unanswered) we fail over to Pulse in ~1s
+    # instead of waiting out avahi's multi-second default.
+    ip=$(timeout 1 avahi-resolve -n "$mdnshost" 2>/dev/null | cut -f 2)
+    [[ -n "$ip" ]] && { printf '%s\n' "$ip"; return 0; }
+    # 2) Pulse fallback, keyed by serial (the mDNS host without .local). Only
+    # attempt it for serial-shaped inputs (two letters + digits), so IP literals
+    # and arbitrary/typo'd names pass straight through instead of being sent to
+    # the Pulse API as bogus serials.
+    local serial="${mdnshost%.local}"
+    if [[ "$serial" =~ ^[A-Za-z]{2}[0-9]{8,}$ ]]; then
+        ip=$(pulse_ip "$serial") && [[ -n "$ip" ]] && { printf '%s\n' "$ip"; return 0; }
+    fi
+    return 1
+}
+
+cmd_resolve() {
     local ip
-    ip=$(avahi-resolve -n "$mdnshost" 2>/dev/null | cut -f 2)
-    printf '%s\n' "${ip:-$name}"
+    ip=$(resolve_to_ip "$1")
+    # On failure fall through to the input so callers can try their own
+    # resolution (IP literals, unknown names, …).
+    printf '%s\n' "${ip:-$1}"
+}
+
+# cmd_host <name> — print the mDNS host (e.g. NB….local) a friendly name maps
+# to, or nothing. Used by jdb to learn a target's expected serial.
+cmd_host() {
+    local name="$1"
+    [[ -f "$CONFIG" && "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 0
+    # shellcheck disable=SC1090
+    source "$CONFIG"
+    printf '%s\n' "${!name:-}"
+}
+
+# _serial_of <name> — the serial a name resolves to (mDNS host minus .local),
+# derived exactly like resolve_to_ip, without any lookup.
+_serial_of() {
+    local name="$1" mdnshost=""
+    if [[ -f "$CONFIG" && "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        # shellcheck disable=SC1090
+        source "$CONFIG"
+        mdnshost="${!name:-}"
+    fi
+    [[ -z "$mdnshost" ]] && { [[ "$name" == *.* ]] && mdnshost="$name" || mdnshost="$name.local"; }
+    printf '%s\n' "${mdnshost%.local}"
+}
+
+# cmd_cached <name> — print the last-known IP from the cache without probing
+# mDNS or calling Pulse, or nothing. Lets callers address an already-connected
+# device cheaply, instead of paying the connect-time resolution cost.
+# Deliberately NOT TTL-checked: it's a best-effort "last known" that's only
+# populated by the Pulse path. For addressing, a stale IP just fails to connect;
+# for the reverse-map label it's a display-only hint. Don't add a TTL here.
+cmd_cached() {
+    local f="$CACHE_DIR/$(_serial_of "$1").ip"
+    [[ -f "$f" ]] && cat "$f"
 }
 
 cmd_reverse_map() {
     [[ -f "$CONFIG" ]] || exit 0
+    # Builds the IP→name map used to annotate `jdb devices` and the device
+    # picker. Speed matters here — this runs before the picker is even drawn —
+    # so: take the cached IP first (instant, no probe), and only fall back to an
+    # mDNS probe otherwise, running the probes in parallel so the worst case is
+    # one ~1s timeout rather than one per host. No Pulse lookup: a connected
+    # device is already cached from connecting, and the picker must not block on
+    # the network.
     while IFS='=' read -r name mdnshost; do
         [[ -z "$name" || "$name" == \#* ]] && continue
-        ip=$(avahi-resolve -n "$mdnshost" 2>/dev/null | cut -f 2)
-        if [[ -n "$ip" ]]; then
-            printf '%s\t%s (%s)\n' "$ip" "$name" "$mdnshost"
-        fi
+        {
+            ip="$(cmd_cached "$name")"
+            [[ -z "$ip" ]] && ip="$(timeout 1 avahi-resolve -n "$mdnshost" 2>/dev/null | cut -f 2)"
+            [[ -n "$ip" ]] && printf '%s\t%s (%s)\n' "$ip" "$name" "$mdnshost"
+        } &
     done < "$CONFIG"
+    wait
 }
 
 cmd_help() {
     echo "Usage: mdns-resolve [command] [args]"
     echo
     echo "Commands:"
-    echo "  resolve <name|mdns-hostname>   Resolve a name to an IP (default)"
-    echo "  reverse-map                    Resolve all hosts and print IP/name map"
-    echo "  help                           Show this help"
+    echo "  resolve <name|serial|mdns-host>  Resolve to an IP (default command)"
+    echo "  cached <name>                    Print the cached IP only (no probe)"
+    echo "  host <name>                      Print the mDNS host a name maps to"
+    echo "  reverse-map                      Resolve all hosts; print IP/name map"
+    echo "  help                             Show this help"
     echo
     echo "Friendly names are mapped in ~/.config/mdns-resolve/hosts"
+    echo "mDNS is tried first; Neat Pulse (~/.config/mdns-resolve/pulse.conf) is"
+    echo "the fallback when mDNS can't resolve (e.g. off-LAN over Tailscale)."
 }
 
 case "${1:-}" in
     reverse-map)    cmd_reverse_map ;;
+    host)
+        [[ -z "${2:-}" ]] && { cmd_help; exit 1; }
+        cmd_host "$2"
+        ;;
+    cached)
+        [[ -z "${2:-}" ]] && { cmd_help; exit 1; }
+        cmd_cached "$2"
+        ;;
     help|--help|-h) cmd_help ;;
     resolve)
         [[ -z "${2:-}" ]] && { cmd_help; exit 1; }
