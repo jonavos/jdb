@@ -1,9 +1,15 @@
 #!/bin/bash
 
-# Print the serial of the adb device to act on.
+# Print the serial(s) of the adb device(s) to act on.
 # - 1 device: print its serial.
-# - >1 devices: prompt the user via /dev/tty and print the chosen serial.
+# - >1 devices: prompt the user via /dev/tty and print the chosen serial(s).
 # - 0 devices: error and exit non-zero.
+#
+# With --multi, several devices may be selected (Space toggles the current one,
+# a toggles all); one serial is printed per line.
+
+multi=0
+[[ "$1" == "--multi" ]] && { multi=1; shift; }
 
 declare -A ip_to_name
 while IFS=$'\t' read -r ip label; do
@@ -40,16 +46,19 @@ if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
 fi
 
 draw_line() {
-    local i=$1 marker='  ' on='' off=''
+    local i=$1 marker='  ' on='' off='' box=''
     if (( i == cursor )); then
         marker='> '
         on=$'\e[7m'
         off=$'\e[0m'
     fi
+    if (( multi )); then
+        (( selected[i] )) && box='[x] ' || box='[ ] '
+    fi
     if [[ -n "${labels[i]}" ]]; then
-        printf '%s%s%d) %-20s  %s%s\n' "$marker" "$on" $((i+1)) "${labels[i]}" "${serials[i]}" "$off"
+        printf '%s%s%s%d) %-20s  %s%s\n' "$marker" "$on" "$box" $((i+1)) "${labels[i]}" "${serials[i]}" "$off"
     else
-        printf '%s%s%d) %s%s\n' "$marker" "$on" $((i+1)) "${serials[i]}" "$off"
+        printf '%s%s%s%d) %s%s\n' "$marker" "$on" "$box" $((i+1)) "${serials[i]}" "$off"
     fi
 }
 
@@ -58,13 +67,23 @@ print_menu() {
     for ((i=0; i<n; i++)); do
         draw_line "$i"
     done
-    printf '[Up/Down to move, Enter to select, 1-%d to jump, q to cancel]\n' "$n"
+    if (( multi )); then
+        printf '[Up/Down move, Space toggle, a all, Enter confirm, q cancel]\n'
+    else
+        printf '[Up/Down to move, Enter to select, 1-%d to jump, q to cancel]\n' "$n"
+    fi
 }
 
 cursor=0
+declare -a selected
+for ((i=0; i<n; i++)); do selected[i]=0; done
 
 {
-    echo "Multiple devices connected:"
+    if (( multi )); then
+        echo "Select devices (Space to toggle, a for all):"
+    else
+        echo "Multiple devices connected:"
+    fi
     print_menu
 } > /dev/tty
 
@@ -91,16 +110,42 @@ while :; do
             esac
             redraw
             ;;
+        ' ')
+            if (( multi )); then
+                selected[cursor]=$(( selected[cursor] ? 0 : 1 ))
+                redraw
+            fi
+            ;;
+        a)
+            if (( multi )); then
+                allsel=1
+                for ((i=0; i<n; i++)); do (( selected[i] )) || { allsel=0; break; }; done
+                for ((i=0; i<n; i++)); do selected[i]=$(( allsel ? 0 : 1 )); done
+                redraw
+            fi
+            ;;
         '')
+            if (( multi )); then
+                out=()
+                for ((i=0; i<n; i++)); do (( selected[i] )) && out+=("${serials[i]}"); done
+                (( ${#out[@]} == 0 )) && out=("${serials[cursor]}")
+                printf '%s\n' "${out[@]}"
+                exit 0
+            fi
             printf '%s\n' "${serials[$cursor]}"
             exit 0
             ;;
         [1-9])
             if (( c <= n )); then
                 cursor=$((c-1))
-                redraw
-                printf '%s\n' "${serials[$cursor]}"
-                exit 0
+                if (( multi )); then
+                    selected[cursor]=$(( selected[cursor] ? 0 : 1 ))
+                    redraw
+                else
+                    redraw
+                    printf '%s\n' "${serials[$cursor]}"
+                    exit 0
+                fi
             fi
             ;;
         q)

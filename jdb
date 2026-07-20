@@ -13,9 +13,16 @@ jdb-specific behavior:
   jdb disconnect [NAME]       resolve NAME via mDNS; bare form disconnects all
   jdb -s NAME[:PORT] ...      -s argument is resolved via mDNS
 
-When multiple devices are attached and -s is not given, jdb prompts to pick
-one via adb-pick-device. Names without an alias are tried as <name>.local;
-IP literals and unresolvable inputs pass through unchanged.
+Targeting multiple devices:
+  jdb --all shell ...         run the command against every attached device
+  jdb -s NAME -s NAME ...     run against the named subset (-s is repeatable)
+  jdb shell ...               with >1 device and no target, prompt to select
+                              one or more (Space toggles, a selects all)
+Output from each device is prefixed with its friendly name (or serial).
+
+When multiple devices are attached and no target is given, jdb prompts via
+adb-pick-device. Names without an alias are tried as <name>.local; IP literals
+and unresolvable inputs pass through unchanged.
 
 All other arguments are forwarded to adb. adb usage follows.
 ----
@@ -56,38 +63,47 @@ resolve_with_port() {
     printf '%s:%s\n' "$(mdns-resolve "$name")" "$port"
 }
 
-args=()
-has_s=0
-for arg in "$@"; do
-    if [[ "$prev" == "-s" ]]; then
-        arg=$(resolve_with_port "$arg")
-        has_s=1
-    fi
-    prev="$arg"
-    args+=("$arg")
-done
-
 # Handle "jdb connect <name> [<name> ...]"
-if [[ "${args[0]}" == "connect" ]]; then
+if [[ "$1" == "connect" ]]; then
     status=0
-    for name in "${args[@]:1}"; do
+    for name in "${@:2}"; do
         adb connect "$(resolve_with_port "$name")" || status=$?
     done
     exit "$status"
 fi
 
 # Handle "jdb disconnect <name>" — bare "jdb disconnect" still disconnects all.
-if [[ "${args[0]}" == "disconnect" && -n "${args[1]:-}" ]]; then
-    exec adb disconnect "$(resolve_with_port "${args[1]}")"
+if [[ "$1" == "disconnect" && -n "${2:-}" ]]; then
+    exec adb disconnect "$(resolve_with_port "$2")"
 fi
+
+# Extract device targets (-s NAME, repeatable; --all/-a) from the command; the
+# rest is forwarded to adb verbatim.
+targets=()      # resolved serials to act on
+all=0
+cmd=()
+prev=""
+for arg in "$@"; do
+    if [[ "$prev" == "-s" ]]; then
+        targets+=("$(resolve_with_port "$arg")")
+        prev=""
+        continue
+    fi
+    case "$arg" in
+        -s)       prev="-s"; continue ;;
+        -a|--all) all=1; continue ;;
+    esac
+    cmd+=("$arg")
+    prev="$arg"
+done
 
 # First positional arg (the adb subcommand), skipping flags and their values.
 subcmd=""
 skip_next=0
-for a in "${args[@]}"; do
+for a in "${cmd[@]}"; do
     if (( skip_next )); then skip_next=0; continue; fi
     case "$a" in
-        -s|-H|-P|-L|-t) skip_next=1; continue ;;
+        -H|-P|-L|-t) skip_next=1; continue ;;
         -*) continue ;;
     esac
     subcmd="$a"
@@ -97,17 +113,66 @@ done
 # Subcommands that don't operate on a single device — pass through unchanged.
 case "$subcmd" in
     start-server|kill-server|version|--version|pair|disconnect|reconnect|mdns)
-        exec adb "${args[@]}"
+        exec adb "${cmd[@]}"
         ;;
 esac
 
-# Inject -s when multiple devices are connected and the user didn't pick one.
-if (( !has_s )); then
+# Resolve the target set.
+if (( all )); then
+    mapfile -t targets < <(adb devices 2>/dev/null | awk -F'\t' 'NR>1 && $2=="device"{print $1}')
+    if (( ${#targets[@]} == 0 )); then
+        echo "jdb: --all given but no devices are connected" >&2
+        exit 1
+    fi
+elif (( ${#targets[@]} == 0 )); then
+    # No explicit target: prompt only when more than one device is attached.
     count=$(adb devices 2>/dev/null | awk -F'\t' 'NR>1 && $2=="device"' | wc -l)
     if (( count > 1 )); then
-        serial=$(adb-pick-device) || exit
-        args=(-s "$serial" "${args[@]}")
+        mapfile -t targets < <(adb-pick-device --multi) || exit
     fi
 fi
 
-exec adb "${args[@]}"
+# 0 or 1 target: single adb invocation (0 lets adb apply its own default).
+if (( ${#targets[@]} <= 1 )); then
+    if (( ${#targets[@]} == 1 )); then
+        exec adb -s "${targets[0]}" "${cmd[@]}"
+    fi
+    exec adb "${cmd[@]}"
+fi
+
+# Multiple targets: build an aligned "[name]" prefix per device.
+declare -A ip_to_name
+while IFS=$'\t' read -r ip label; do
+    [[ -n "$ip" ]] && ip_to_name["$ip"]="$label"
+done < <(mdns-resolve reverse-map)
+
+label_for() {
+    local serial="$1" name
+    if [[ "$serial" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):[0-9]+ ]]; then
+        name="${ip_to_name[${BASH_REMATCH[1]}]%% (*}"
+        [[ -n "$name" ]] && { printf '%s' "$name"; return; }
+    fi
+    printf '%s' "$serial"
+}
+
+tokens=()
+width=0
+for serial in "${targets[@]}"; do
+    tok="[$(label_for "$serial")]"
+    tokens+=("$tok")
+    (( ${#tok} > width )) && width=${#tok}
+done
+
+# Run all targets concurrently, prefixing each output line with the device.
+pids=()
+for i in "${!targets[@]}"; do
+    prefix=$(printf '%-*s ' "$width" "${tokens[i]}")
+    ( set -o pipefail; adb -s "${targets[i]}" "${cmd[@]}" 2>&1 | sed "s|^|$prefix|" ) &
+    pids+=("$!")
+done
+
+status=0
+for pid in "${pids[@]}"; do
+    wait "$pid" || status=$?
+done
+exit "$status"
