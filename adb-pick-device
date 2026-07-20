@@ -88,7 +88,13 @@ for ((i=0; i<n; i++)); do selected[i]=0; done
 } > /dev/tty
 
 old_stty=$(stty -g < /dev/tty)
-trap 'stty "$old_stty" < /dev/tty' EXIT
+# Restore on EXIT *and* on signals: bash does not run an EXIT trap when killed
+# by an untrapped SIGINT, so a Ctrl-C out of the picker would otherwise leave
+# the terminal in raw mode (no echo, buffered input) for every later command.
+restore_tty() { stty "$old_stty" < /dev/tty 2>/dev/null; }
+trap restore_tty EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 stty -echo -icanon < /dev/tty
 
 redraw() {

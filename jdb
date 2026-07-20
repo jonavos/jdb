@@ -77,37 +77,35 @@ if [[ "$1" == "disconnect" && -n "${2:-}" ]]; then
     exec adb disconnect "$(resolve_with_port "$2")"
 fi
 
-# Extract device targets (-s NAME, repeatable; --all/-a) from the command; the
-# rest is forwarded to adb verbatim.
+# Extract device targets from the options that precede the adb subcommand:
+# -s NAME (repeatable) and --all. Everything from the subcommand onward is
+# forwarded to adb verbatim — so e.g. `am broadcast -a ACTION` keeps its -a.
+# Other pre-subcommand adb global options (-H/-P/-L/-t and their values, -d/-e,
+# etc.) are passed straight through.
 targets=()      # resolved serials to act on
 all=0
 cmd=()
-prev=""
+subcmd=""
+seen_subcmd=0
+expect_s=0
+skip_val=0
 for arg in "$@"; do
-    if [[ "$prev" == "-s" ]]; then
-        targets+=("$(resolve_with_port "$arg")")
-        prev=""
-        continue
+    if (( seen_subcmd )); then
+        cmd+=("$arg"); continue
+    fi
+    if (( skip_val )); then
+        cmd+=("$arg"); skip_val=0; continue
+    fi
+    if (( expect_s )); then
+        targets+=("$(resolve_with_port "$arg")"); expect_s=0; continue
     fi
     case "$arg" in
-        -s)       prev="-s"; continue ;;
-        -a|--all) all=1; continue ;;
+        -s)          expect_s=1 ;;
+        --all)       all=1 ;;
+        -H|-P|-L|-t) cmd+=("$arg"); skip_val=1 ;;   # global option + its value
+        -*)          cmd+=("$arg") ;;               # other global flag
+        *)           cmd+=("$arg"); subcmd="$arg"; seen_subcmd=1 ;;
     esac
-    cmd+=("$arg")
-    prev="$arg"
-done
-
-# First positional arg (the adb subcommand), skipping flags and their values.
-subcmd=""
-skip_next=0
-for a in "${cmd[@]}"; do
-    if (( skip_next )); then skip_next=0; continue; fi
-    case "$a" in
-        -H|-P|-L|-t) skip_next=1; continue ;;
-        -*) continue ;;
-    esac
-    subcmd="$a"
-    break
 done
 
 # Subcommands that don't operate on a single device — pass through unchanged.
@@ -128,7 +126,10 @@ elif (( ${#targets[@]} == 0 )); then
     # No explicit target: prompt only when more than one device is attached.
     count=$(adb devices 2>/dev/null | awk -F'\t' 'NR>1 && $2=="device"' | wc -l)
     if (( count > 1 )); then
-        mapfile -t targets < <(adb-pick-device --multi) || exit
+        # Capture via a variable so a cancelled picker (non-zero exit) aborts
+        # jdb — piping into `mapfile` would mask the picker's exit status.
+        selection=$(adb-pick-device --multi) || exit
+        mapfile -t targets <<< "$selection"
     fi
 fi
 
@@ -164,10 +165,12 @@ for serial in "${targets[@]}"; do
 done
 
 # Run all targets concurrently, prefixing each output line with the device.
+# Each adb reads from /dev/null: backgrounded jobs must not share the terminal's
+# stdin, or they fight over it and corrupt it for later commands and the picker.
 pids=()
 for i in "${!targets[@]}"; do
     prefix=$(printf '%-*s ' "$width" "${tokens[i]}")
-    ( set -o pipefail; adb -s "${targets[i]}" "${cmd[@]}" 2>&1 | sed "s|^|$prefix|" ) &
+    ( set -o pipefail; adb -s "${targets[i]}" "${cmd[@]}" </dev/null 2>&1 | sed "s|^|$prefix|" ) &
     pids+=("$!")
 done
 
