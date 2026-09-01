@@ -3,6 +3,7 @@
 args=()
 has_s=0
 needs_device=1
+audio=0
 for arg in "$@"; do
     if [[ "$prev" == "-s" || "$prev" == "--serial" ]]; then
         ip=$(mdns-resolve "$arg")
@@ -11,10 +12,13 @@ for arg in "$@"; do
     fi
     case "$arg" in
         --version|--help) needs_device=0 ;;
+        --audio) audio=1; prev="$arg"; continue ;;
     esac
     prev="$arg"
     args+=("$arg")
 done
+
+(( audio )) || args=(--no-audio "${args[@]}")
 
 if (( needs_device && !has_s )); then
     count=$(adb devices 2>/dev/null | awk -F'\t' 'NR>1 && $2=="device"' | wc -l)
